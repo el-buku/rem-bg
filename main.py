@@ -2,34 +2,39 @@ import asyncio
 import email
 import imaplib
 import os
+import random
 import re
 import time
 
 from playwright.async_api import Browser, Page, async_playwright
 
-email_addr='youremail@cock.li'
-email_pass='emailpass'
-adobe_pass="youradobepass"
-file_path = "cat.jpeg"
+from credentials import lock_credential, select_credential
 
 TIMEOUT_AFTER_LOGIN=4 # seconds
 TIMEOUT_AFTER_UPLOAD=4
+target_path = 'target'
+out_path = 'out'
 
 
-user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36"
+async def convert(browser,tgt_file_path, out_file_path):
+    print("converting: ",tgt_file_path)
+    account = await select_credential()
 
-async def main():
-  async with async_playwright() as p:
+    email_addr = account["email_addr"]
+    email_pass =account["email_pass"]
+    adobe_pass =account["adobe_pass"]
+    print("using acc: ", account["email_addr"])
     url = "https://new.express.adobe.com/tools/remove-background"
     auth_url="https://auth.services.adobe.com/*/index.html**"
+    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/111.0.0.0 Safari/537.36"
     login_sel={
-      "email":"#EmailPage-EmailField",
-      "email_btn":"#EmailForm > section.EmailPage__submit.mod-submit > div.ta-right > button",
-      "send_code_btn":"#App > div > div > section > div > div > section > div.Route > section > div > div > section > section > section.Page__actions.mt-xs-4 > button",
-      "code_input":'input.CodeInput-Digit',
-      "pass":"#PasswordPage-PasswordField",
-      "pass_btn":"#PasswordForm > section.PasswordPage__action-buttons-wrapper > div:nth-child(2) > button",
-      "card_body":"#App > div > div > section > div > div > section > div.Route > section > div > div > section"
+        "email":"#EmailPage-EmailField",
+        "email_btn":"#EmailForm > section.EmailPage__submit.mod-submit > div.ta-right > button",
+        "send_code_btn":"#App > div > div > section > div > div > section > div.Route > section > div > div > section > section > section.Page__actions.mt-xs-4 > button",
+        "code_input":'input.CodeInput-Digit',
+        "pass":"#PasswordPage-PasswordField",
+        "pass_btn":"#PasswordForm > section.PasswordPage__action-buttons-wrapper > div:nth-child(2) > button",
+        "card_body":"#App > div > div > section > div > div > section > div.Route > section > div > div > section"
     }
 
     js_findDropzone='''
@@ -45,7 +50,7 @@ async def main():
 
 
     async def on_file_chooser(file_chooser):
-        await file_chooser.set_files([file_path])
+        await file_chooser.set_files([tgt_file_path])
 
     async def is_logged_in(page:Page)->bool:
         profile_block = page.locator("#gnt_2609_0")
@@ -53,6 +58,17 @@ async def main():
         return not ("sign" in text_content.lower())
 
     async def do_login(page:Page)->Page:
+        async def check_is_locked():
+            card_body=page.locator(login_sel["card_body"])
+            if "try again" in (await card_body.text_content()).lower():
+                print("Account locked, triyng again")
+                await browser.close()
+                await lock_credential(account["email_addr"])
+                return True
+            else:
+                return False
+
+
         print("logging in...")
         profile_block = page.locator("#gnt_2609_0")
         await profile_block.click()
@@ -68,9 +84,8 @@ async def main():
         await send_code_btn.click()
         await page.wait_for_load_state("networkidle")
 
-        card_body=page.locator(login_sel["card_body"])
-        if "try again" in (await card_body.text_content()).lower():
-            raise Exception("Account locked, try again later!")
+        if await check_is_locked():
+            return await convert(tgt_file_path, out_file_path)
 
         print("waiting for verification code...")
         verif_cod=poll_for_verification_code(email_addr, email_pass)
@@ -79,6 +94,7 @@ async def main():
         for i in range(len(inputs)):
             await inputs[i].type(verif_cod[i])
         await page.wait_for_load_state("networkidle")
+
 
         pass_field  = page.locator(login_sel["pass"])
         await pass_field.type(adobe_pass)
@@ -100,7 +116,6 @@ async def main():
         else:
            return page
 
-    browser = await p.chromium.launch(headless=True)
     try:
         page= await get_page_with_login(browser)
         page.on('filechooser', on_file_chooser)
@@ -121,7 +136,7 @@ async def main():
         download = await download_info.value
 
         # Wait for the download process to complete and save the downloaded file
-        dl_path =os.path.join(os.getcwd(), download.suggested_filename)
+        dl_path =os.path.join(os.getcwd(), out_file_path)
         await download.save_as(dl_path)
         print(f"File downloaded and moved to: {dl_path}")
 
@@ -129,8 +144,7 @@ async def main():
 
     except Exception as e:
         print("An error occurred:", e)
-    finally:
-        await browser.close()
+
 
 
 
@@ -188,7 +202,34 @@ def poll_for_verification_code(email_address, password, imap_server='mail.cock.l
             # Wait for the next poll interval even in case of an error
             time.sleep(poll_interval)
 
+async def main():
+    # Create the output folder if it doesn't exist.
+    if not os.path.exists(out_path):
+        os.makedirs(out_path)
+    all_done=True
+    # Iterate over the images in the target folder.
+    for image_file in os.listdir(target_path):
+        # Get the image extension.
+        img_name = os.path.splitext(image_file)[0]
+
+        # Check if the image has already been converted.
+        tgt_img_path = os.path.join(target_path , image_file)
+        out_img_path = os.path.join(out_path,  f'{img_name}.png')
+        if os.path.exists(out_img_path):
+            continue
+        all_done = False
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            try:
+                await convert(browser,tgt_img_path, out_img_path)
+            except Exception as e:
+                print(e)
+                break
+            finally:
+                await browser.close()
+    if  all_done:
+        print("All images already converted!")
+
+
 if __name__ == "__main__":
     asyncio.run(main())
-
-
